@@ -86,12 +86,11 @@ via(#via{}=Via) ->
 
 
 %% @doc Serializes a list of `token()'
--spec tokens([nksip_lib:token()]) ->
+-spec tokens([nksip_tokenizer:token()]) ->
     binary().
 
 tokens(Tokens) ->
     list_to_binary(raw_tokens(Tokens)).
-
 
 
 %% ===================================================================
@@ -103,18 +102,17 @@ tokens(Tokens) ->
 -spec packet(nksip:request() | nksip:response()) -> 
     binary().
 
-packet(#sipmsg{class=response, response=Code, opts=Opts}=Response) 
-        when is_integer(Code)->
+packet(#sipmsg{class={resp, Code}, data=Data}=Response) ->
     list_to_binary([<<"SIP/2.0 ">>, nksip_lib:to_binary(Code), 32, 
-        case nksip_lib:get_binary(reason, Opts) of
+        case nksip_lib:get_binary(reason, Data) of
             <<>> -> resp_text(Code);
             RespText -> RespText
         end,
         <<"\r\n">>, serialize(Response)]);
 
-packet(#sipmsg{class=request, response=undefined}=Request)  ->
+packet(#sipmsg{class={req, Method}}=Request)  ->
     list_to_binary([
-        nksip_lib:to_binary(Request#sipmsg.method), 
+        nksip_lib:to_binary(Method), 
         32, raw_ruri(Request#sipmsg.ruri), <<" SIP/2.0\r\n">>,
         serialize(Request)
     ]).
@@ -195,7 +193,7 @@ raw_via(#via{}=Via) ->
     ].
 
 %% @private Serializes a list of `token()'
--spec raw_tokens([nksip_lib:token()]) ->
+-spec raw_tokens([nksip_tokenizer:token()]) ->
     iolist().
 
 raw_tokens([]) ->
@@ -206,7 +204,7 @@ raw_tokens(Tokens) ->
 
 
 %% @private
--spec raw_tokens([nksip_lib:token()], iolist()) ->
+-spec raw_tokens([nksip_tokenizer:token()], iolist()) ->
     iolist().
 
 raw_tokens([{Head, Opts}, Second | Rest], Acc) ->

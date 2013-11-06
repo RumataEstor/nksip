@@ -3,19 +3,27 @@ ROADMAP
 
 In no special order:
 
-* SIP message processing engine rework.
+* ~~SIP message processing engine rework~~.
+* ~~_Inline_ callback functions~~.
+* Extract examples into new repository.
+* _Websockets_ and _SCTP_ support.
+* Socket external control (to be able to use NkSIP without having to use Erlang or outside of the NkSIP Erlang VM).
+* Javascript, Python, Ruby, Lua, Java libraries. Elixir DSL?
+* ~~DNS stateful processing~~.
+* ~~Outbound connection server~~.
 * _Bridge_ support for B2BUA.
-* _IPv6_.
-* _SIP Websockets_ support.
-* External control, to be able to use NkSIP without having to use Erlang or outside of the NkSIP Erlang VM.
+* ~~_IPv6_~~.
 * Fully distributed, highly available version based on [Riak Core](https://github.com/basho/riak_core).
 * IMS and RCS extensions.
 * More application examples.
+* Better statistics support.
+* Admin web console.
+* Flood control.
+* Congestion control.
 
 
 Many common SIP featured are still missing and will be addressed in following versions, including:
 
-* [RFC2976](http://tools.ietf.org/html/rfc2976): INFO
 * [RFC3262](http://tools.ietf.org/html/rfc3262): PRACK
 * [RFC3265](http://tools.ietf.org/html/rfc3265): SUBSCRIBE, NOTIFY
 * [RFC3311](http://tools.ietf.org/html/rfc3311): UPDATE

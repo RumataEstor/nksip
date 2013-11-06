@@ -22,7 +22,7 @@
 %%
 %% This module allows to manage <i>NkSIP application instances</i> or <b>SipApps</b>. 
 %% NkSIP can start any number of SipApps, each one listening on one or several sets of 
-%% ip, port and transport (UDP, TCP or TLS currently).
+%% ip, port and transport (UDP, TCP, TLS or SCTP currently).
 %%
 %% To register a SipApp, you must first create a <i>callback module</i> using 
 %% behaviour {@link nksip_sipapp} (you can also use the <i>default callback module</i>
@@ -56,14 +56,15 @@
 -author('Carlos Gonzalez <carlosj.gf@gmail.com>').
 
 -export([start/4, stop/1, stop_all/0, get_all/0]).
--export([call/2, call/3, cast/2, reply/2, get_pid/1, get_port/2]).
+-export([call/2, call/3, cast/2, reply/2, get_pid/1, get_port/3]).
 
 -include("nksip.hrl").
 
--export_type([sipapp_id/0, request/0, response/0, sipreply/0]).
+-export_type([app_id/0, request/0, response/0, sipreply/0]).
 -export_type([uri/0, user_uri/0]).
 -export_type([header/0, scheme/0, protocol/0, method/0, response_code/0, via/0]).
 -export_type([call_id/0, cseq/0, tag/0, body/0, uri_set/0, aor/0]).
+-export_type([dialog/0]).
 
 
 
@@ -72,7 +73,7 @@
 %% ===================================================================
 
 %% Unique Id of each started SipApp
--type sipapp_id() :: term().
+-type app_id() :: term().
 
 %% Parsed SIP Request
 -type request() :: #sipmsg{}.
@@ -93,7 +94,7 @@
 -type header() :: {binary(), binary() | atom() | integer()}.
 
 %% Recognized transport schemes
--type protocol() :: udp | tcp | tls | binary().
+-type protocol() :: udp | tcp | tls | sctp | ws | wss | binary().
 
 %% Recognized SIP schemes
 -type scheme() :: sip | sips | tel | mailto | binary().
@@ -127,6 +128,10 @@
 %% Address of Record
 -type aor() :: {Scheme::scheme(), User::binary(), Domain::binary()}.
 
+%% Dialog
+-type dialog() :: #dialog{}.
+
+
 
 %% ===================================================================
 %% Public functions
@@ -145,7 +150,7 @@
 %%          <td>`from'</td>
 %%          <td>{@link user_uri()}</td>
 %%          <td>`"NkSIP App <sip:user@nksip>"'</td>
-%%          <td>Default <i>From</i> to use in the requests</td>
+%%          <td>Default <i>From</i> to use in the requests.</td>
 %%      </tr>
 %%      <tr>
 %%          <td>`pass'</td>
@@ -166,47 +171,48 @@
 %%          <td>NkSIP will try to <i>REGISTER</i> the SipApp with this registrar server, 
 %%          (i.e. "sips:sip2sip.info"). <br/> 
 %%          See {@link nksip_sipapp_auto:get_registers/1}
-%%          and {@link nksip_sipapp:register_update/3}</td>
+%%          and {@link nksip_sipapp:register_update/3}.</td>
 %%      </tr>
 %%      <tr>
 %%          <td>`register_expires'</td>
 %%          <td>`integer()'</td> 
 %%          <td>`300'</td>
-%%          <td>In case of register, registration interval (secs)</td>
+%%          <td>In case of register, registration interval (secs).</td>
 %%      </tr>
 %%      <tr>
 %%          <td>`transports'</td>
 %%          <td>
 %%              `[{Proto, Ip, Port}]'<br/>
 %%              <code>Proto::{@link protocol()}</code><br/>
-%%              `Ip::inet:ip_address()'<br/>
-%%              `Port::inet:port_number()'
+%%              `Ip::inet:ip_address()|string()|binary()|any|any6'<br/>
+%%              `Port::inet:port_number()|all'
 %%          </td>
-%%          <td>`[{udp,{0,0,0,0},0}, {tls, {0,0,0,0}, 0}]'</td>
+%%          <td>`[{udp, any, all}, {tls, any, all}]'</td>
 %%          <td>The SipApp can start any number of transports. 
 %%          If an UDP transport is started, a TCP transport on the same IP and port
 %%          will be started automatically.<br/>
-%%          Use `{0,0,0,0}' to use <i>all</i> available IP addresses and `0' to use
-%%          any available port</td>
+%%          Use `any' to use <i>all</i> available IPv4 addresses and 
+%%          `any6' for all IPv6 addresses, and `all' to use
+%%          any available port.</td>
 %%      </tr>
 %%      <tr>
 %%          <td>`listeners'</td>
 %%          <td>`integer()'</td>
 %%          <td>`1'</td>
 %%          <td>Number of pre-started listeners for TCP and TLS
-%%          (see <a href="http://ninenines.eu/docs/en/ranch/HEAD/guide/introduction">Ranch's</a> documentation)</td>
+%%          (see <a href="http://ninenines.eu/docs/en/ranch/HEAD/guide/introduction">Ranch's</a> documentation).</td>
 %%      </tr>
 %%      <tr>
 %%          <td>`certfile'</td>
 %%          <td>`string()'</td>
-%%          <td>`"(privir)/cert.pem"'</td>
-%%          <td> Path to the certificate file for TLS</td>
+%%          <td>`"(privdir)/cert.pem"'</td>
+%%          <td> Path to the certificate file for TLS.</td>
 %%      </tr>
 %%      <tr>
 %%          <td>`keyfile'</td>
 %%          <td>`string()'</td>
 %%          <td>`"(privdir)/key.pem"'</td>
-%%          <td>Path to the key file for TLS</td>
+%%          <td>Path to the key file for TLS.</td>
 %%      </tr>
 %%      <tr>
 %%          <td>`route'</td>
@@ -214,7 +220,7 @@
 %%          <td></td>
 %%          <td> Route (outbound proxy) to use. Generates one or more `Route' headers
 %%              in every request, for example `<sip:1.2.3.4;lr>, <sip:abcd;lr>' 
-%%              (you will usually append the `lr' option to use <i>loose routing</i>)
+%%              (you will usually append the `lr' option to use <i>loose routing</i>).
 %%          </td>
 %%      </tr>
 %%      <tr>
@@ -223,11 +229,19 @@
 %%          <td>`auto'</td>
 %%          <td>Default host or IP to use in headers like `Via', `Contact' and 
 %%          `Record-Route'.<br/>
-%%          If set to `auto', NkSIP will use the IP of the
+%%          If set to `auto' NkSIP will use the IP of the
 %%          transport selected in every case. If that transport is listening on all
-%%          addresses (`{0,0,0,0}'), NkSIP will try to find the best IP, using the first 
-%%          valid IP of all the network interfaces in this order: `eth0, eth1, en0, en1',
-%%          or any other IP address of the host</td>
+%%          addresses NkSIP will try to find the best IP using the first 
+%%          valid IP among the network interfaces `ethX' and 'enX',
+%%          or localhost if none is found.</td>
+%%      </tr>
+%%      <tr>
+%%          <td>`local_host6'</td>
+%%          <td>`auto|string()|binary()'</td>
+%%          <td>`auto'</td>
+%%          <td>Default host or IP to use in headers like `Via', `Contact' and 
+%%          `Record-Route' for IPv6 transports.<br/>
+%%          See `local_host' option.</td>
 %%      </tr>
 %%      <tr>
 %%          <td>`registrar'</td>
@@ -244,28 +258,47 @@
 %%          <td></td>
 %%          <td></td>
 %%          <td>If present, forbids the generation of automatic `100-type' responses
-%%          if no other response has been generated after 100 msecs</td>
+%%          for INVITE requests.</td>
 %%      </tr>
 %%  </table>
 %%
 %% <br/>
--spec start(sipapp_id(), atom(), term(), nksip_lib:proplist()) -> 
+-spec start(app_id(), atom(), term(), nksip_lib:proplist()) -> 
 	ok | {error, Error} 
     when Error :: invalid_from | invalid_transport | invalid_register | invalid_route |
                   no_matching_tcp | could_not_start_udp | could_not_start_tcp |
-                  could_not_start_tls.
+                  could_not_start_tls | could_not_start_sctp.
 
 start(AppId, Module, Args, Opts) ->
     try
         Transports = [
             case Transport of
                 {Scheme, Ip, Port} 
-                    when (Scheme=:=udp orelse Scheme=:=tcp orelse Scheme=:=tls)
-                    andalso is_integer(Port) ->
-                        case catch inet_parse:ntoa(Ip) of
-                            {'EXIT', _} -> throw(invalid_transport);
-                            _ -> {Scheme, Ip, Port}
-                        end;
+                    when (Scheme=:=udp orelse Scheme=:=tcp orelse 
+                          Scheme=:=tls orelse Scheme=:=sctp) ->
+                    Ip1 = case Ip of
+                        any -> 
+                            {0,0,0,0};
+                        any6 ->
+                            {0,0,0,0,0,0,0,0};
+                        _ when is_tuple(Ip) ->
+                            case catch inet_parse:ntoa(Ip) of
+                                {error, _} -> throw(invalid_transport);
+                                {'EXIT', _} -> throw(invalid_transport);
+                                _ -> Ip
+                            end;
+                        _ ->
+                            case nksip_lib:to_ip(Ip) of
+                                {ok, PIp} -> PIp;
+                                error -> throw(invalid_transport)
+                            end
+                    end,
+                    Port1 = case Port of
+                        all -> 0;
+                        _ when is_integer(Port), Port >= 0 -> Port;
+                        _ -> throw(invalid_transport)
+                    end,
+                    {Scheme, Ip1, Port1};
                 _ ->
                     throw(invalid_transport)
             end
@@ -322,7 +355,19 @@ start(AppId, Module, Args, Opts) ->
             end,
             case nksip_lib:get_value(local_host, Opts, auto) of
                 auto -> [];
-                Host -> {local_host, nksip_lib:to_binary(Host)}
+                Host -> {local_host, nksip_lib:to_host(Host)}
+            end,
+            case nksip_lib:get_value(local_host6, Opts, auto) of
+                auto -> 
+                    [];
+                Host6 -> 
+                    case nksip_lib:to_ip(Host6) of
+                        {ok, HostIp6} -> 
+                            % Ensure it is enclosed in `[]'
+                            {local_host6, nksip_lib:to_host(HostIp6, true)};
+                        error -> 
+                            {local_host6, nksip_lib:to_binary(Host6)}
+                    end
             end,
             case lists:member(registrar, Opts) of
                 true -> registrar;
@@ -333,20 +378,14 @@ start(AppId, Module, Args, Opts) ->
                 _ -> []
             end
         ],
-        case nksip_sup:start_core(AppId, Module, Args, lists:flatten(CoreOpts)) of
-            ok ->
-                {ok, _} = nksip_proc:wait_put({nksip_sipapp_opts, AppId}, 5000),
-                ok;
-            {error, Error} ->
-                {error, Error}
-        end
+        nksip_sup:start_core(AppId, Module, Args, lists:flatten(CoreOpts))
     catch
         throw:Throw -> {error, Throw}
     end.
 
 
 %% @doc Stops a started SipApp, stopping any registered transports.
--spec stop(sipapp_id()) -> 
+-spec stop(app_id()) -> 
     ok | error.
 
 stop(AppId) ->
@@ -369,15 +408,14 @@ stop_all() ->
 
 %% @doc Gets the `AppIds' of all started SipApps.
 -spec get_all() ->
-    [AppId::sipapp_id()].
+    [AppId::app_id()].
 
 get_all() ->
     [AppId || {AppId, _Pid} <- nksip_proc:values(nksip_sipapps)].
 
 
-
 %% @doc Sends a response from a synchronous callback function.
-%% (equivalent to `gen_server:reply/2')
+%% Eequivalent to `gen_server:reply/2'.
 -spec reply({reference(), pid()} | {fsm, reference(), pid()}, term()) -> 
     term().
 
@@ -388,7 +426,7 @@ reply(From, Reply) ->
 %% @doc Sends a synchronous message to the SipApp's process, 
 %% similar to `gen_server:call/2'.
 %% The SipApp's callback module must implement `handle_call/3'.
--spec call(sipapp_id(), term()) ->
+-spec call(app_id(), term()) ->
     any().
 
 call(AppId, Msg) ->
@@ -398,7 +436,7 @@ call(AppId, Msg) ->
 %% @doc Sends a synchronous message to the SipApp's process with a timeout, 
 %% similar to `gen_server:call/3'.
 %% The SipApp's callback module must implement `handle_call/3'.
--spec call(sipapp_id(), term(), infinity|pos_integer()) ->
+-spec call(app_id(), term(), infinity|pos_integer()) ->
     any().
 
 call(AppId, Msg, Timeout) ->
@@ -411,7 +449,7 @@ call(AppId, Msg, Timeout) ->
 %% @doc Sends an asynchronous message to the SipApp's process, 
 %% similar to `gen_server:cast/2'.
 %% The SipApp's callback module must implement `handle_cast/2'.
--spec cast(sipapp_id(), term()) ->
+-spec cast(app_id(), term()) ->
     ok.
 
 cast(AppId, Msg) ->
@@ -422,7 +460,7 @@ cast(AppId, Msg) ->
 
 
 %% @doc Gets the SipApp's process `pid()'.
--spec get_pid(sipapp_id()) -> 
+-spec get_pid(app_id()) -> 
     pid() | not_found.
 
 get_pid(Id) ->
@@ -432,12 +470,12 @@ get_pid(Id) ->
     end.
 
 
-%% @doc Gets SipApp'sfirst listening port on this transport protocol.
--spec get_port(sipapp_id(), protocol()) -> 
+%% @doc Gets SipApp's first listening port on this transport protocol.
+-spec get_port(app_id(), protocol(), ipv4|ipv6) -> 
     inet:port_number() | not_found.
 
-get_port(AppId, Proto) ->
-    case nksip_transport:get_listening(AppId, Proto) of
+get_port(AppId, Proto, Class) ->
+    case nksip_transport:get_listening(AppId, Proto, Class) of
         [{#transport{listen_port=Port}, _Pid}|_] -> Port;
         _ -> not_found
     end.

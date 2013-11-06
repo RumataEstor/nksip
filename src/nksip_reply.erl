@@ -72,6 +72,7 @@
 %%   <tr><td>`timeout'</td><td>408</td><td></td></tr>
 %%   <tr><td>`{timeout, Text}'</td><td>408</td>
 %%       <td>`Text' will be used in SIP reason line</td></tr>
+%%   <tr><td>`too_large'</td><td>413</td><td></td></tr>
 %%   <tr><td>`{unsupported_media_type, Types}'</td><td>415</td>
 %%       <td>Generates a new `Accept' header using `Types'</td></tr>
 %%   <tr><td>`{unsupported_media_encoding, Types}'</td><td>415</td>
@@ -103,6 +104,9 @@
 %%        <td>Will include headers and body in response</td></tr>
 %%   <tr><td>`{Code, [Header], Body, Options}'</td><td>`Code'</td>
 %%       <td>Will include headers and body in response, using options</td></tr>
+%%   <tr><td>`register'</td><td>See {@link nksip_registrar:request/1}</td>
+%%       <td>Calls {@link nksip_registrar:request/1} to process the request as a 
+%%           registration</td></tr>
 %% </table> 
 %% <br/>
 %% With the following types:
@@ -111,7 +115,7 @@
 %%   <tr><td>`Code'</td><td>{@link nksip:response_code()}</td></tr>
 %%   <tr><td>`Header'</td><td>{@link nksip:header()}</td></tr>
 %%   <tr><td>`Body'</td><td>{@link nksip:body()}</td></tr>
-%%   <tr><td>`Options'</td><td>{@link nksip_lib:prolist()}</td></tr>
+%%   <tr><td>`Options'</td><td>{@link nksip_lib:proplist()}</td></tr>
 %%   <tr><td>`Text'</td><td>`binary()'</td></tr>
 %%   <tr><td>`Realm'</td><td>`binary()'</td></tr>
 %%   <tr><td>`Methods'</td><td>`binary()'</td></tr>
@@ -143,7 +147,7 @@
 
 -include("nksip.hrl").
 
--export([reply/2, error/2, error/3, reqreply/1]).
+-export([reply/2, reqreply/1]).
 
 -export_type([sipreply/0]).
 
@@ -168,6 +172,7 @@
     {method_not_allowed, Methods::binary()} |
     proxy_authenticate | {proxy_authenticate, Realm::binary()} |
     timeout | {timeout, Text::binary()} | 
+    too_large |
     {unsupported_media_type, Types::binary()} | 
     {unsupported_media_encoding, Types::binary()} |
     unsupported_uri_scheme | 
@@ -190,27 +195,23 @@
     {nksip:response_code(), binary()} | 
     {nksip:response_code(), [nksip:header()]} | 
     {nksip:response_code(), [nksip:header()], nksip:body()} | 
-    {nksip:response_code(), [nksip:header()], nksip:body(), nksip_lib:proplist()}.
+    {nksip:response_code(), [nksip:header()], nksip:body(), nksip_lib:proplist()} | 
+    register.
 
 
 %% ===================================================================
 %% Public
 %% ===================================================================
 
-%% @doc Generates a new SIP response using helper replies.
-%% Currently recognized replies are describes {@link nksip_reply. here}.
-%%
-%% A <i>Timestamp</i> header will be added if it was present in `Request' and 
-%% response code is 100. A <i>To</i> tag will be set if parameter 
-%% `{to_tag, Tag}' is present in the request's options.
-%% If the response is for an INVITE request, options `make_allow', `make_supported'
-%% and `make_contact' will be added automatically, and (if code is 101-299) all
-%% <i>Record-Route</i> headers from the request will be copied in the response.
+%% @doc Generates a new SIP response and send options using helper replies.
+%% Currently recognized replies are described in this module.
+%% See {@link nksip_uas_lib:response/5}.
 -spec reply(nksip:request(), nksip:sipreply()|#reqreply{}) -> 
-    nksip:response().
+    {nksip:response(), nksip_lib:proplist()}.
 
-reply(#sipmsg{sipapp_id=AppId, call_id=CallId}=Req, 
-            #reqreply{code=Code, headers=Headers, body=Body, opts=Opts}) ->
+reply(Req, #reqreply{}=ReqReply) ->
+    #sipmsg{app_id=AppId, call_id=CallId} = Req,
+    #reqreply{code=Code, headers=Headers, body=Body, opts=Opts} = ReqReply,
     case nksip_lib:get_value(contact, Opts, []) of
         [] ->
             nksip_uas_lib:response(Req, Code, Headers, Body, Opts);
@@ -219,24 +220,28 @@ reply(#sipmsg{sipapp_id=AppId, call_id=CallId}=Req,
                 [] -> 
                     ?warning(AppId, CallId, "UAS returned invalid contact: ~p", 
                             [ContactSpec]),
-                    error(Req, 500, <<"Invalid SipApp Response">>);
+                    Opts1 = [{reason, <<"Invalid SipApp Response">>}],
+                    nksip_uas_lib:response(Req, 500, [], <<>>, Opts1);
                 Contacts ->
-                    Opts1 = [{contact, Contacts}|Opts],
+                    Opts1 = [{contact, Contacts}],
                     nksip_uas_lib:response(Req, Code, Headers, Body, Opts1)
             end
     end;
 
-reply(#sipmsg{sipapp_id=AppId, call_id=CallId}=Req, SipReply) -> 
+reply(Req, register) -> 
+    Reply = nksip_registrar:request(Req),
+    reply(Req, Reply);
+
+reply(#sipmsg{app_id=AppId, call_id=CallId}=Req, SipReply) -> 
     case nksip_reply:reqreply(SipReply) of
-        #reqreply{} = SipReply1 -> 
+        #reqreply{} = ReqReply -> 
             ok;
         error -> 
             ?warning(AppId, CallId, "Invalid sipreply: ~p, ~p", 
                             [SipReply, erlang:get_stacktrace()]),
-            SipReply1 = nksip_reply:reqreply({internal_error, 
-                                                <<"Invalid Response">>})
+            ReqReply = reqreply({internal_error, <<"Invalid SipApp Response">>})
     end,
-    reply(Req, SipReply1).
+    reply(Req, ReqReply).
 
 
 %% @private Generates an `#reqreply{}' from an `user_sipreply()' like 
@@ -317,6 +322,8 @@ reqreply({unsupported_media_type, Types}) ->
         code=415, 
         headers = nksip_headers:new([{single, <<"Accept">>, Types1}])
     };
+reqreply(too_large) ->
+    #reqreply{code=413};
 reqreply({unsupported_media_encoding, Types}) ->
     Types1 = nksip_lib:to_binary(Types),    
     #reqreply{
@@ -361,6 +368,8 @@ reqreply({internal_error, Text}) ->
     helper_debug(#reqreply{code=500}, Text);
 reqreply(service_unavailable) ->
     #reqreply{code=503};
+reqreply({service_unavailable, Text}) ->
+    helper_debug(#reqreply{code=503}, Text);
 reqreply(busy_eveywhere) ->
     #reqreply{code=600};
 reqreply(decline) ->
@@ -378,26 +387,6 @@ reqreply({Code, Headers, Body, Opts}) when is_integer(Code), is_list(Headers),
     #reqreply{code=Code, headers=Headers, body=Body, opts=Opts};
 reqreply(_Other) ->
     error.
-
-
-
-%% @private Generares a new `Response' for a `Request' with `ResponseCode', representing
-%% an error. A <i>Date</i> header will be generated.
--spec error(nksip:request(), nksip:response_code()) -> 
-    nksip:response().
-
-error(Req, RespCode) ->
-    reply(Req, #reqreply{code=RespCode, opts=[make_date]}).
-
-
-%% @private Generares a new `Response' for a `Request' with `ResponseCode', representing
-%% an error, and changing the SIP response description text to `Debug'.  
-%% A <i>Date</i> header will be generated.
--spec error(nksip:request(), nksip:response_code(), string() | binary()) -> 
-    nksip:response().
-
-error(Req, RespCode, Debug) ->
-    reply(Req, #reqreply{code=RespCode, opts=[{reason, Debug}, make_date]}).
 
 
 

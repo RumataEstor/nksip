@@ -5,7 +5,7 @@
 
 @author Carlos Gonzalez Florido <carlosj.gf@gmail.com>
 @copyright 2013 Carlos Gonzalez Florido
-@version 0.1.0
+@version 0.2.0
 @title Welcome to NkSIP
 
 @doc NkSIP is an Erlang <a href="http://en.wikipedia.org/wiki/Session_Initiation_Protocol">SIP</a> framework (or <i>application server</i>), which greatly facilitates the development of robust and scalable server-side SIP applications like proxy, registrar, redirect or outbound servers and <a href="http://en.wikipedia.org/wiki/Back-to-back_user_agent">B2BUAs</a>.
@@ -50,9 +50,9 @@ NkSIP allows you to run any number of <b>SipApps</b>. To {@link nksip:start/4. s
 
 NkSIP has a clean, written from scratch, <a href="http://www.erlang.org/doc/design_principles/users_guide.html">OTP compliant</a> and <a href="http://www.erlang.org/doc/reference_manual/typespec.html">fully typed</a> Erlang code. New RFCs and features can be implemented securely and quickly. If you want to customize the way NkSIP behaves beyond what the callback mechanism offers, it should be easy to understand the code and use it as a powerful base for your specific application server.
 
-NkSIP is currently alpha quality, it probably has important bugs and is <b>not yet production-ready</b>, but it is already very robust, thanks to its OTP design. Also thanks to its Erlang roots it can perform many actions while running: starting and stopping SipApps, hot code upgrades, configuration changes and even changing your application behavior and function callbacks on the fly.
+NkSIP is currently alpha quality. It is <b>not yet production-ready</b>, but it is already very robust, thanks to its OTP design. Also thanks to its Erlang roots it can perform many actions while running: starting and stopping SipApps, hot code upgrades, configuration changes and even changing your application behavior and function callbacks on the fly.
 
-NkSIP scales automatically using all of the available cores on the machine. Without any serious optimization done yet, and using common hardware (4-core i7 MacMini), it is easy to get more than 1.000 call cycles (INVITE-ACK-BYE) or 10.000 stateless registrations per second. On the roadmap there is a fully distributed version, based on <a href="https://github.com/basho/riak_core">Riak Core</a>, that will allow you to add and remove nodes while running, scale as much as needed and offer a very high availability, all of it without changing your application.
+NkSIP scales automatically using all of the available cores on the machine. Using common hardware (4-core i7 MacMini), it is easy to get more than 3.000 call cycles (INVITE-ACK-BYE) or 10.000 stateless registrations per second. On the roadmap there is a fully distributed version, based on <a href="https://github.com/basho/riak_core">Riak Core</a>, that will allow you to add and remove nodes while running, scale as much as needed and offer a very high availability, all of it without changing your application.
 
 NkSIP is a pure SIP framework, so it <em>does not support any real RTP media processing</em>: it can't record a call, host an audio conference or transcode. These type of tasks should be done with a SIP media server, like <a href="http://www.freeswitch.org">Freeswitch</a> or <a href="http://www.asterisk.org">Asterisk</a>. However NkSIP can act as a standard endpoint (or a B2BUA, actually), which is very useful in many scenarios: registering with an external server, answering and redirecting a call or recovering in real time from a failed media server.
 
@@ -69,7 +69,7 @@ You can develop <i>any</i> kind of SIP application with NkSIP. This includes end
 
 Any NkSIP instance can start any number of <b>SipApps</b>. Each SipApp starts listening on one or more sets of IP, port and transport. For example, an instance of NkSIP could start a <i>server1</i> SipApp, which could be a proxy server listening on 192.168.0.1:5060 using protocols UDP and TCP, and on 192.168.0.1:5061 using TLS, and another one called <i>b2bua2</i> behaving as a B2BUA could be started listening on any other IP and port of the host.
 
-When starting a SipApp, you must supply a <b>callback Erlang module</b> for it, using {@link nksip_sipapp} <i>behavior</i>. There is a number of callback functions this module can implement, but only `init/1' is mandatory. See the full list {@link nksip_sipapp. here}. This `nksip_sipapp' behavior closely resembles the familiar OTP `gen_server' behavior (it <i>is</i> actually a modified and mostly backwards-compatible `gen_server' under the hood, so even standard `handle_call', `handle_cast', `handle_info' and `terminate' callbacks are available).
+When starting a SipApp, you must supply a <b>callback Erlang module</b> for it, using {@link nksip_sipapp} <i>behavior</i>. There is a number of callback functions this module can implement, but only `init/1' is mandatory. This `nksip_sipapp' behavior closely resembles the familiar OTP `gen_server' behavior (it <i>is</i> actually a modified and mostly backwards-compatible `gen_server' under the hood, so even standard `handle_call', `handle_cast', `handle_info' and `terminate' callbacks are available).
 As such a `gen_server', `init/1' is called on startup and must supply an <i>application state</i> that will be offered and can be modified by the application in every callback call.
 
 As an important difference with standard `gen_server', each other callback function apart from `init/1' has a <i>default implementation</i> in case it is not actually defined in your callback module. See {@link nksip_sipapp} to find the default implementation for each one.
@@ -81,18 +81,20 @@ SIP is all about sending specific SIP messages (<i>requests</i>), and receiving 
 
 There are a small number of SIP request types (INVITE, OPTIONS, etc.), and each corresponding response will have a HTTP-type code (100-699). Responses of type 1xx are <i>provisional</i>, and the rest are <i>final</i>. 2xx responses denote a successful processing, 3xx denote a redirect proposal, 4xx indicate an error processing the request, 5xx a server error and 6xx a global error.
 
-In NkSIP you can start sending requests using the functions in {@link nksip_uac} such as `options/3', `invite/3' etc., and the response will be received as the function returns. For example, if you send and OPTIONS request, the called party will probably reply with a 200 response containing, among other things, the codecs it supports.
+In NkSIP you can start sending requests using the functions in {@link nksip_uac} such as `options/3', `invite/3' etc., and the response will be received as the function's return value. For example, if you send and OPTIONS request, the called party will probably reply with a 200 response containing, among other things, the codecs it supports.
 
-Your application will also start receiving responses sent from other SIP endpoints or proxies, and NkSIP will then call the corresponding function in your callback module. Depending on the value your function returns, a specific SIP response will be generated and sent. For example, if someone sends you an INVITE, NkSIP will call `invite(DialogId, Request, From, State)' in your callback module (if this function is not defined, the default implementation in {@link nksip_sipapp} would be used). You could answer `{reply, busy, State}' to send a standard <i>busy</i> (code 486) response, and NkSIP will generate all required SIP headers and it will send back the response.
+Your application will also start receiving requests sent from other SIP endpoints or proxies, and NkSIP will then call the corresponding function in your callback module. Depending on the value your function returns, a specific SIP response will be generated and sent. For example, if someone sends you an INVITE, NkSIP will call `invite(Request, From, State)' in your callback module (if this function is not defined, the default implementation in {@link nksip_sipapp} would be used). You could answer `{reply, busy, State}' to send a standard <i>busy</i> (code 486) response, and NkSIP will generate all required SIP headers and it will send back the response.
 
 
 === Transactions ===
 
 SIP offers two possibilities for sending requests and receiving responses: <i>inside a transaction</i> or <i>without transaction</i>. 
 
-A <i>SIP transaction</i> is a process that is started by a SIP endpoint acting as a client when the request is sent, and it is destroyed soon after a final response is received, or it is created by a SIP endpoint acting as a server when a request is received, and it is destroyed after a final response is sent. Among other things, transactions take care of message retransmissions automatically.
+A <i>SIP transaction</i> is a piece of state created by a SIP endpoint acting as a client when the request is sent, and it is destroyed soon after a final response is received, or it is created by a SIP endpoint acting as a server when a request is received, and it is destroyed after a final response is sent. Among other things, transactions take care of message retransmissions automatically.
 
-Most SIP requests are usually sent and received using transactions, but in some cases it makes sense to send or receive requests without a corresponding transaction. They will be processed more quickly, and as NkSIP will not create the additional process it will scale better. NkSIP request generating functions such as {@link nksip_uac:invite/3} or {@link nksip_uac:options/3} will always use transactions, but it offers you the option to process incoming requests statelessly, mainly for failed authentication responses (or to test the maximum speed NkSIP is able to process messages). They are also not used if you decide to behave as a <i>stateless proxy</i> for any incoming request.
+Most SIP requests are usually sent and received inside transactions, but in some cases it makes sense to send or receive requests without a corresponding transaction. As no additional state is stored, the application will scale better. NkSIP request generating functions such as {@link nksip_uac:invite/3} or {@link nksip_uac:options/3} will always use transactions, but it offers you the option to process incoming requests statelessly, mainly for failed authentication responses (or to test the maximum speed NkSIP is able to process messages). They are also not used if you decide to behave as a <i>stateless proxy</i> for any incoming request.
+
+If transactions are no used, retransmissions and forked responses will not be detected, and they will look like brand new requests to the application. NkSIP won't send retransmissions either.
 
 Except for INVITE, SIP transactions should be very short-lived. They should complete quickly (bellow half a second) or retransmissions will start to be sent. Final responses for INVITE transactions can last for seconds or even minutes (as the user must usually reply to the invite manually), but even in this case provisional responses should be sent quickly.
 
@@ -105,7 +107,7 @@ A successful response to some SIP requests (INVITE, SUBSCRIBE and others) create
 
 When the call is <i>hung up</i>, a BYE is usually sent and NkSIP destroys the dialog.
 
-New requests can be sent <i>inside</i> the newly created dialog. If no new request is sent or received during a specific period of time (see {@section Configuration}), NkSIP would also destroy the dialog. You should <i>refresh</i> the dialog periodically (for example calling {@link nksip_uac:refresh/2} or sending a new in-dialog request).
+New requests can be sent <i>inside</i> the newly created dialog. If no new request is sent or received during a specific period of time (see {@section Configuration}), NkSIP would also destroy the dialog. You should <i>refresh</i> the dialog periodically (for example calling {@link nksip_uac:refresh/3} or sending a new in-dialog request).
 
 When a dialog is created, destroyed or updated the corresponding function in your callback module is called. You can use these calls to know about the dialog current state, for example for billing purposes. Stateless proxies don't generate or process dialogs.
 
@@ -121,12 +123,14 @@ NkSIP is a pure SIP framework and, as such, has no RTP processing capability by 
 
 If you are developing a SIP proxy, you won't usually want to do any media processing. If you are developing an endpoint or an B2BUA, you can pretend to have media processing capabilities using a media server as a backend, for example inviting the media server before answering the call and sending the media server's SDP as if it were generated by ours. 
 
+You can use the functions in {@link nksip_sdp} to access, create or modify SDP bodies.
+
 
 === Contacts ===
 
 There are several situations in any SIP enabled application where we must send to the other party a SIP URI showing the protocol, IP and port where we are currently listening to receive new requests. A <i>Contact</i> header is used for this. For example when sending a REGISTER we must indicate to the registrar where it must send any request directed to us. When starting a dialog with INVITE we must inform the other party where to receive in-dialog requests.
 
-NkSIP will try to automatically generate a correct <i>Contact</i> header for you, using the same transport, IP and port used to send this specific request. For example, if we have a <i>SipApp</i> listening on 192.168.0.1:5070 for UDP and TCP, and 192.168.0.1:5071 for TLS, sending a REGISTER to the <i>URI</i> `sip:registrar.com;transport=tcp', will generate a `Contact' header like `&gt;sip:192.168.0.1:5070;transport=tcp&lt;'.
+NkSIP will try to automatically generate a correct <i>Contact</i> header for you, using the same transport, IP and port used to send this specific request. For example, if we have a <i>SipApp</i> listening on 192.168.0.1:5070 for UDP and TCP, and 192.168.0.1:5071 for TLS, sending a REGISTER to the <i>URI</i> `<sip:registrar.com;transport=tcp>', will generate a `Contact' header like `<sip:192.168.0.1:5070;transport=tcp>'.
 
 If the listening address of the selected transport is <i>0.0.0.0</i> (meaning "listen on all interfaces") NkSIP will try to find, among all the IPs of the host, which is the <i>best</i> one to use. It uses a sorted list of network cards (specifically `eth0', `eth1', `en0' and `en1') fetching the IP from the first active network card. If none is available it will get any IP from the host.
 
@@ -139,7 +143,7 @@ In some circumstances, it makes sense to override NkSIP automatic calculation of
 
 === Starting a SipApp ===
 
-Prior to any other thing you need to start the SipApps you are going to work with. See {@link nksip} for a reference description and available options. 
+First of all, you need to start the SipApps you are going to work with. See {@link nksip} for a reference description and available options. 
 
 
 === Sending requests ===
@@ -163,10 +167,15 @@ Many of the functions in the callback module allow to send a response to the inc
 NkSIP includes a full registrar implementation according to RFC3261. Its functionality is described in {@link nksip_registrar}.
 
 
+== Resolver ==
+
+NkSIP includes a caching SIP location server. Every DNS access (for A/AAAA, SRV and NAPTR records) is 
+cached (see configuration for default time). Use the functions in {@link nksip_dns} to clear the cache.
+
+
 == Configuration ==
 
-NkSIP has few global configuration options. Their default values are defined in the {@link nksip_config} and all of them can be while running using. 
-
+NkSIP has few global configuration options. Their default values are defined in the {@link nksip_config}.
 
 == Log and Tracing ==
 
@@ -199,6 +208,7 @@ NkSIP can also activate SIP tracing on any SipApp, using the trace facilities in
 
 <table border="1">
   <tr><th>RFC</th><th>Description</th><th>Coverage</th></tr>
+  <tr><td><a href="http://tools.ietf.org/html/rfc2976">RFC2976</a></td><td>INFO</td><td></td></tr>
   <tr><td><a href="http://tools.ietf.org/html/rfc3261">RFC3261</a></td><td>SIP 2.0</td><td>Full</td></tr>
   <tr><td><a href="http://tools.ietf.org/html/rfc2617">RFC2617</a></td><td>Digest authentication</td><td>Full</td></tr>
   <tr><td><a href="http://tools.ietf.org/html/rfc3263">RFC3263</a></td><td>SRV Resolution</td><td>Full (but no SRV/NAPTR weights support)</td></tr>
@@ -214,7 +224,7 @@ NkSIP features also:
 
 <ul>
   <li>Full RFC3261 coverage, including SIP Registrar (RAM storage only).</li>
-  <li>A written from scratch, fully typed Erlang code easy to understand and extend. More than 50 unit tests.</li>
+  <li>A written from scratch, fully typed Erlang code easy to understand and extend. 60 unit tests convering most functionality.</li>
   <li>Hot core and application code upgrade.</li>
   <li>Very few external dependencies: <a href="https://github.com/basho/lager">Lager</a> for error logging and <a href="http://ninenines.eu">Cowboy</a> as TCP/SSL acceptor and Websocket server.</li>
   <li>UDP, TCP and TLS transports, capable of handling thousands of simultaneous sessions.</li>
@@ -231,7 +241,6 @@ NkSIP features also:
 Many common SIP featured are still missing and will be addressed in following versions, including (but not in any particular priority order):
 
 <ul>
-  <li><a href="http://tools.ietf.org/html/rfc2976">RFC2976</a>: INFO</li>
   <li><a href="http://tools.ietf.org/html/rfc3262">RFC3262</a>: PRACK</li>
   <li><a href="http://tools.ietf.org/html/rfc3265">RFC3265</a>: SUBSCRIBE, NOTIFY</li>
   <li><a href="http://tools.ietf.org/html/rfc3311">RFC3311</a>: UPDATE</li>

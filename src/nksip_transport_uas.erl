@@ -23,7 +23,7 @@
 -module(nksip_transport_uas).
 -author('Carlos Gonzalez <carlosj.gf@gmail.com>').
 
--export([send_response/2, send_response/1, resend_response/1]).
+-export([send_response/3, resend_response/3]).
     
 -include("nksip.hrl").
 
@@ -32,31 +32,26 @@
 %% Public
 %% ===================================================================
 
-%% @doc Sends a new `Response'.
--spec send_response(nksip:request(), nksip:sipreply()) ->
-    {ok, nksip:response()} | error.
 
-send_response(Request, SipReply) ->
-    send_response(nksip_reply:reply(Request, SipReply)).
-
+-type send_opt() :: {local_host, auto|binary()} | make_contact | secure.
 
 %% @doc Sends a new `Response'.
--spec send_response(Response::nksip:response()) ->
+-spec send_response(nksip:response(), binary(), [send_opt()]) ->
     {ok, nksip:response()} | error.
 
-send_response(#sipmsg{
-                sipapp_id = AppId, 
-                vias = [Via|_],
-                start = Start,
-                cseq_method = Method,
-                response = Code
-            } = Response) ->
-    #via{proto=Proto, domain=Domain, port=Port, opts=Opts} = Via,
-    {ok, RIp} = nksip_lib:to_ip(nksip_lib:get_value(received, Opts)),
-    RPort = nksip_lib:get_integer(rport, Opts),
+send_response(#sipmsg{class={resp, Code}}=Resp, GlobalId, Opts) ->
+    #sipmsg{
+        app_id = AppId, 
+        vias = [Via|_],
+        start = Start,
+        cseq_method = Method
+    } = Resp,
+    #via{proto=Proto, domain=Domain, port=Port, opts=ViaOpts} = Via,
+    {ok, RIp} = nksip_lib:to_ip(nksip_lib:get_value(received, ViaOpts)),
+    RPort = nksip_lib:get_integer(rport, ViaOpts),
     TranspSpec = case Proto of
         'udp' ->
-            case nksip_lib:get_binary(maddr, Opts) of
+            case nksip_lib:get_binary(maddr, ViaOpts) of
                 <<>> when RPort=:=0 -> [{udp, RIp, Port}];
                 <<>> -> [{udp, RIp, RPort}];
                 MAddr -> [#uri{domain=MAddr, port=Port}]   
@@ -67,28 +62,32 @@ send_response(#sipmsg{
                 #uri{domain=Domain, port=Port, opts=[{transport, Proto}]}
             ]
     end,
-    GlobalId = nksip_config:get(global_id),
-    RouteBranch = nksip_lib:get_binary(branch, Opts),
+    RouteBranch = nksip_lib:get_binary(branch, ViaOpts),
     RouteHash = <<"NkQ", (nksip_lib:hash({GlobalId, AppId, RouteBranch}))/binary>>,
-    MakeResponseFun = make_response_fun(RouteHash, Response),
-    nksip_trace:insert(Response, {send_response, Method, Code}),
-    Return = nksip_transport:send(AppId, TranspSpec, MakeResponseFun),
+    MakeRespFun = make_response_fun(RouteHash, Resp, Opts),
+    nksip_trace:insert(Resp, {send_response, Method, Code}),
+    Return = nksip_transport:send(AppId, TranspSpec, MakeRespFun, Opts),
     Elapsed = nksip_lib:l_timestamp()-Start,
     nksip_stats:uas_response(Elapsed),
     Return.
 
 
 %% @doc Resends a previously sent response to the same ip, port and protocol.
--spec resend_response(Response::nksip:response()) ->
+-spec resend_response(Resp::nksip:response(), binary(), nksip_lib:proplist()) ->
     {ok, nksip:response()} | error.
 
-resend_response(#sipmsg{sipapp_id=AppId, response=Code, cseq_method=Method, 
-                        transport=Transport}=Response) ->
+resend_response(#sipmsg{class={resp, Code}, app_id=AppId, cseq_method=Method, 
+                        transport=#transport{}=Transport}=Resp, _GlobalId, Opts) ->
     #transport{proto=Proto, remote_ip=Ip, remote_port=Port} = Transport,
-    MakeResponse = fun(_) -> Response end,
-    Return = nksip_transport:send(AppId, [{current, {Proto, Ip, Port}}], MakeResponse),
-    nksip_trace:insert(Response, {sent_response, Method, Code}),
-    Return.
+    MakeResp = fun(_) -> Resp end,
+    Return = nksip_transport:send(AppId, [{current, {Proto, Ip, Port}}], MakeResp, Opts),
+    nksip_trace:insert(Resp, {sent_response, Method, Code}),
+    Return;
+
+resend_response(#sipmsg{app_id=AppId, call_id=CallId}=Resp, GlobalId, Opts) ->
+    ?info(AppId, CallId, "Called resend_response/2 without transport\n", []),
+    send_response(Resp, GlobalId, Opts).
+
 
 
 %% ===================================================================
@@ -96,40 +95,61 @@ resend_response(#sipmsg{sipapp_id=AppId, response=Code, cseq_method=Method,
 %% ===================================================================
 
 %% @private
--spec make_response_fun(binary(), nksip:response()) ->
+%% Recognizes options local_host, make_contact
+-spec make_response_fun(binary(), nksip:response(), nksip_lib:proplist()) ->
     function().
 
-make_response_fun(RouteHash, 
-            #sipmsg{
-                vias = [#via{proto=ViaProto, opts=ViaOpts}=Via|ViaR], 
-                to = To, 
-                headers = Headers,
-                contacts = Contacts, 
-                body = Body, 
-                opts = Opts
-            }= Response) ->
+make_response_fun(RouteHash, Resp, Opts) ->
+    #sipmsg{
+        app_id = AppId,
+        call_id = CallId,
+        vias = [#via{opts=ViaOpts}=Via|ViaR], 
+        to = To, 
+        headers = Headers,
+        contacts = Contacts, 
+        body = Body
+    }= Resp,
     fun(#transport{
                     proto = Proto, 
                     listen_ip = ListenIp, 
                     listen_port = ListenPort
                 } = Transport) ->
-        ListenHost = case nksip_lib:get_value(local_host, Opts, auto) of
-            auto when ListenIp =:= {0,0,0,0} -> 
-                nksip_lib:to_binary(nksip_transport:main_ip());
-            auto -> 
-                nksip_lib:to_binary(ListenIp);
-            Host -> 
-                nksip_lib:to_binary(Host)
+        ListenHost = case size(ListenIp) of
+            4 ->
+                case nksip_lib:get_value(local_host, Opts, auto) of
+                    auto when ListenIp =:= {0,0,0,0} -> 
+                        nksip_lib:to_host(nksip_transport:main_ip());
+                    auto -> 
+                        nksip_lib:to_host(ListenIp);
+                    Host -> 
+                        Host
+                end;
+            8 ->
+                case nksip_lib:get_value(local_host6, Opts, auto) of
+                    auto when ListenIp =:= {0,0,0,0,0,0,0,0} -> 
+                        nksip_lib:to_host(nksip_transport:main_ip6(), true);
+                    auto -> 
+                        nksip_lib:to_host(ListenIp, true);
+                    Host -> 
+                        Host
+                end
+        end,
+        ?debug(AppId, CallId, "UAS listenhost is ~s", [ListenHost]),
+        Scheme = case Proto=:=tls andalso lists:member(secure, Opts) of
+            true -> sips;
+            _ -> sip
         end,
         Contacts1 = case lists:member(make_contact, Opts) of
             true ->
                 [#uri{
-                    scheme = case Proto of tls -> sips; _ -> sip end,
+                    scheme = Scheme,
                     user = To#uri.user,
                     domain = ListenHost,
                     port = ListenPort,
-                    opts = if 
-                        Proto=:=tls; Proto=:=udp -> []; true -> [{transport, Proto}]
+                    opts = case Proto of 
+                        tls when Scheme=:=sips -> [];
+                        udp when Scheme=:=sip -> [];
+                        _ -> [{transport, Proto}]
                     end}|Contacts];
             false ->
                 Contacts
@@ -151,8 +171,8 @@ make_response_fun(RouteHash,
                     Route
             end
         end,
-        Routes = lists:map(UpdateRoutes, 
-                                nksip_parse:header_uris(<<"Record-Route">>, Response)),
+        RRs = nksip_sipmsg:header(Resp, <<"Record-Route">>, uris),
+        Routes = lists:map(UpdateRoutes, RRs),
         Headers1 = nksip_headers:update(Headers, [
                                         {multi, <<"Record-Route">>, Routes}]),
         Body1 = case Body of
@@ -160,7 +180,7 @@ make_response_fun(RouteHash,
             _ -> Body
         end,
         ViaOpts1 = lists:keydelete(nksip_transport, 1, ViaOpts), 
-        Response#sipmsg{
+        Resp#sipmsg{
             transport = Transport, 
             vias = [Via#via{opts=ViaOpts1}|ViaR],
             contacts = Contacts1,

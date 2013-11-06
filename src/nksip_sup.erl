@@ -91,6 +91,18 @@ start_link() ->
             5000,
             worker,
             [nksip_stats]},
+        {nksip_transport_srv,
+            {nksip_transport_srv, start_link, []},
+            permanent,
+            5000,
+            worker,
+            [nksip_transport_srv]},
+        {nksip_dns,
+            {nksip_dns, start_link, []},
+            permanent,
+            5000,
+            worker,
+            [nksip_dns]},
         {nksip_sipapp_sup,
             {?MODULE, start_cores_sup, []},
             permanent,
@@ -99,7 +111,7 @@ start_link() ->
             [?MODULE]}
      ] 
      ++
-     [get_msg_queue(N) || N <- lists:seq(0, ?MSG_QUEUES-1)],
+     [get_call_routers(N) || N <- lists:seq(0, ?MSG_ROUTERS-1)],
   supervisor:start_link({local, ?MODULE}, ?MODULE, {{one_for_one, 10, 60}, ChildsSpec}).
 
 %% @private
@@ -113,14 +125,14 @@ init(ChildSpecs) ->
 
 
 %% @private
-get_msg_queue(Pos) ->
-    Name = nksip_queue:pos2name(Pos),
+get_call_routers(Pos) ->
+    Name = nksip_call_router:pos2name(Pos),
     {Name,
-        {nksip_queue, start_link, [Name]},
+        {nksip_call_router, start_link, [Pos, Name]},
         permanent,
         5000,
         worker,
-        [nksip_queue]}.
+        [nksip_call]}.
 
 
 

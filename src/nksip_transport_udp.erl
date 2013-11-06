@@ -19,17 +19,15 @@
 %% -------------------------------------------------------------------
 
 %% @private UDP Transport Module.
-
 -module(nksip_transport_udp).
 -author('Carlos Gonzalez <carlosj.gf@gmail.com>').
 -behaviour(gen_server).
 
--export([send/2, send/4, send_stun/3, get_port/1]).
+-export([start_listener/4, send/2, send/4, send_stun/3, get_port/1]).
 -export([start_link/2, init/1, terminate/2, code_change/3, handle_call/3, handle_cast/2,
              handle_info/2]).
 
 -include("nksip.hrl").
--include("nksip_internal.hrl").
 
 -define(MAX_UDP, 1500).
 
@@ -39,24 +37,58 @@
 %% ===================================================================
 
 
+
+%% @private Starts a new listening server
+-spec start_listener(nksip:app_id(), inet:ip_address(), inet:port_number(), 
+                   nksip_lib:proplist()) ->
+    {ok, pid()} | {error, term()}.
+
+start_listener(AppId, Ip, Port, _Opts) ->
+    Transp = #transport{
+        proto = udp,
+        local_ip = Ip, 
+        local_port = Port,
+        listen_ip = Ip,
+        listen_port = Port,
+        remote_ip = {0,0,0,0},
+        remote_port = 0
+    },
+    Spec = {
+        {AppId, udp, Ip, Port}, 
+        {?MODULE, start_link, [AppId, Transp]},
+        permanent, 
+        5000, 
+        worker, 
+        [?MODULE]
+    },
+    nksip_transport_sup:add_transport(AppId, Spec).
+
+
+
 %% @private Sends a new UDP request or response
 -spec send(pid(), #sipmsg{}) ->
     ok | error.
 
-send(Pid, #sipmsg{
-            sipapp_id=AppId, call_id=CallId,
-            transport=#transport{remote_ip=Ip, remote_port=Port}=Transport,
-            method=Method, response=Code}=SipMsg) ->
+send(Pid, SipMsg) ->
+    #sipmsg{
+        class = Class,
+        app_id = AppId, 
+        call_id = CallId,
+        transport=#transport{remote_ip=Ip, remote_port=Port} = Transport
+    } = SipMsg,
     Packet = nksip_unparse:packet(SipMsg),
     case send(Pid, Ip, Port, Packet) of
-        ok when is_integer(Code) -> 
-            nksip_trace:insert(SipMsg, {udp_out, Ip, Port, Code, Packet}),
-            nksip_trace:sipmsg(AppId, CallId, <<"TO">>, Transport, Packet),
-            ok;
         ok ->
-            nksip_trace:insert(SipMsg, {udp_out, Ip, Port, Method, Packet}),
-            nksip_trace:sipmsg(AppId, CallId, <<"TO">>, Transport, Packet),
-            ok;
+            case Class of
+                {req, Method} ->
+                    nksip_trace:insert(SipMsg, {udp_out, Ip, Port, Method, Packet}),
+                    nksip_trace:sipmsg(AppId, CallId, <<"TO">>, Transport, Packet),
+                    ok;
+                {resp, Code} ->
+                    nksip_trace:insert(SipMsg, {udp_out, Ip, Port, Code, Packet}),
+                    nksip_trace:sipmsg(AppId, CallId, <<"TO">>, Transport, Packet),
+                    ok
+            end;
         {error, closed} ->
             error;
         {error, too_large} ->
@@ -121,14 +153,18 @@ start_link(AppId, Transport) ->
 
 
 -record(state, {
-    sipapp_id :: nksip:sipapp_id(),
+    app_id :: nksip:app_id(),
     transport :: nksip_transport:transport(),
     socket :: port(),
     stuns :: [{Id::binary(), Time::nksip_lib:timestamp(), term()}]
 }).
 
 
-%% @private
+
+%% @private 
+-spec init(term()) ->
+    gen_server_init(#state{}).
+
 init([AppId, #transport{listen_ip=Ip, listen_port=Port}=Transport]) ->
     Opts = [binary, {reuseaddr, true}, {ip, Ip}, {active, once}],
     case gen_udp:open(Port, Opts) of
@@ -144,7 +180,7 @@ init([AppId, #transport{listen_ip=Ip, listen_port=Port}=Transport]) ->
                     nksip_proc:put({nksip_listen, AppId}, Transport1),
                     {ok, 
                         #state{
-                            sipapp_id = AppId, 
+                            app_id = AppId, 
                             transport = Transport1, 
                             socket = Socket,
                             stuns = []
@@ -162,11 +198,14 @@ init([AppId, #transport{listen_ip=Ip, listen_port=Port}=Transport]) ->
 
 
 %% @private
+-spec handle_call(term(), from(), #state{}) ->
+    gen_server_call(#state{}).
+
 handle_call({send, Ip, Port, Packet}, _From, #state{socket=Socket}=State) ->
     {reply, gen_udp:send(Socket, Ip, Port, Packet), State};
 
 handle_call({send_stun, Ip, Port}, From, #state{
-                                                sipapp_id=AppId, 
+                                                app_id=AppId, 
                                                 socket=Socket, 
                                                 stuns=Stuns}=State) ->
     {Id, Packet} = nksip_stun:binding_request(),
@@ -183,25 +222,38 @@ handle_call({send_stun, Ip, Port}, From, #state{
     end;
 
 handle_call(get_port, _From, #state{transport=#transport{listen_port=Port}}=State) ->
-    {reply, {ok, Port}, State}.
+    {reply, {ok, Port}, State};
+
+handle_call(Msg, _Form, State) -> 
+    lager:warning("Module ~p received unexpected call: ~p", [?MODULE, Msg]),
+    {noreply, State}.
+
 
 
 %% @private
+-spec handle_cast(term(), #state{}) ->
+    gen_server_cast(#state{}).
+
 handle_cast(no_matching_tcp, State) ->
     {stop, no_matching_tcp, State};
 
 handle_cast(Msg, State) -> 
-    {stop, {unexpected_cast, Msg}, State}.
+    lager:warning("Module ~p received unexpected cast: ~p", [?MODULE, Msg]),
+    {noreply, State}.
+
 
 
 %% @private
+-spec handle_info(term(), #state{}) ->
+    gen_server_info(#state{}).
+
 handle_info({udp, Socket, _Ip, _Port, <<_, _>>}, #state{socket=Socket}=State) ->
     ok = inet:setopts(Socket, [{active, once}]),
     {noreply, State};
 
 handle_info({udp, Socket, Ip, Port, <<0:2, _Header:158, _Msg/binary>>=Packet}, 
             #state{
-                sipapp_id = AppId,
+                app_id = AppId,
                 socket = Socket,
                 stuns = Stuns
             } = State) ->
@@ -236,11 +288,18 @@ handle_info(Info, State) ->
     lager:warning("Module ~p received unexpected info: ~p", [?MODULE, Info]),
     {noreply, State}.
 
+
 %% @private
+-spec code_change(term(), #state{}, term()) ->
+    gen_server_code_change(#state{}).
+
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 %% @private
+-spec terminate(term(), #state{}) ->
+    gen_server_terminate().
+
 terminate(_Reason, _State) ->  
     ok.
 
@@ -253,7 +312,7 @@ terminate(_Reason, _State) ->
 %% @private
 start_tcp(AppId, Ip, Port, Socket, Pid) ->
     gen_tcp:close(Socket),
-    case nksip_transport_conn:start_transport(AppId, tcp, Ip, Port, []) of
+    case nksip_transport:start_transport(AppId, tcp, Ip, Port, []) of
         {ok, _} -> ok;
         {error, _} -> gen_server:cast(Pid, no_matching_tcp)
     end.
@@ -273,13 +332,13 @@ read_packets(N, #state{socket=Socket}=State) ->
 
 
 %% @private
-parse(Packet, Ip, Port, #state{sipapp_id=AppId, transport=Transport}=State) ->   
+parse(Packet, Ip, Port, #state{app_id=AppId, transport=Transport}=State) ->   
     Transport1 = Transport#transport{remote_ip=Ip, remote_port=Port},
     case nksip_parse:packet(AppId, Transport1, Packet) of
         {ok, #raw_sipmsg{call_id=CallId, class=Class}=RawMsg, More} -> 
             nksip_trace:sipmsg(AppId, CallId, <<"FROM">>, Transport1, Packet),
             nksip_trace:insert(AppId, CallId, {in_udp, Class}),
-            nksip_queue:insert(RawMsg),
+            nksip_call_router:incoming_async(RawMsg),
             case More of
                 <<>> -> ok;
                 _ -> ?notice(AppId, "ignoring data after UDP msg: ~p", [More])

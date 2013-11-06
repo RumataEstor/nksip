@@ -23,7 +23,7 @@
 -module(nksip_transport_uac).
 -author('Carlos Gonzalez <carlosj.gf@gmail.com>').
 
--export([add_via/1, send_request/1, resend_request/1]).
+-export([send_request/3, resend_request/2]).
 
 -include("nksip.hrl").
 
@@ -34,11 +34,14 @@
 %% ===================================================================
 
 %% @doc Sends a new request.
--spec send_request(nksip:request()) -> 
+-type send_opt() :: {local_host, auto|binary()} | record_route | make_contact |
+                    stateless_via.  
+
+-spec send_request(nksip:request(), binary(), [send_opt()]) -> 
     {ok, nksip:request()} | error.
 
-send_request(Request) ->
-    #sipmsg{sipapp_id=AppId, method=Method, ruri=RUri, routes=Routes} = Request,
+send_request(Req, GlobalId, Opts) ->
+    #sipmsg{class={req, Method}, app_id=AppId, ruri=RUri, routes=Routes} = Req,
     case Routes of
         [] -> 
             DestUri = RUri1 = RUri,
@@ -64,62 +67,27 @@ send_request(Request) ->
                     Routes1 = RestRoutes ++ [nksip_parse:uri2ruri(RUri)]
             end
     end,
-    MakeRequestFun = make_request_fun(Request#sipmsg{ruri=RUri1, routes=Routes1}),  
-    nksip_trace:insert(Request, {uac_out_request, Method}),
-    case nksip_transport:send(AppId, [DestUri], MakeRequestFun) of
+    Req1 = Req#sipmsg{ruri=RUri1, routes=Routes1},
+    MakeReqFun = make_request_fun(Req1, DestUri, GlobalId, Opts),  
+    nksip_trace:insert(Req, {uac_out_request, Method}),
+    case nksip_transport:send(AppId, [DestUri], MakeReqFun, Opts) of
         {ok, SentReq} -> 
             {ok, SentReq};
         error ->
-            nksip_trace:insert(Request, uac_out_request_error),
+            nksip_trace:insert(Req, uac_out_request_error),
             error
     end.
 
 
 %% @doc Resend an already sent request to the same ip, port and transport.
--spec resend_request(nksip:request()) -> 
+-spec resend_request(nksip:request(), nksip_lib:proplist()) -> 
     {ok, nksip:request()} | error.
 
-resend_request(#sipmsg{sipapp_id=AppId, transport=Transport}=Request) ->
+resend_request(#sipmsg{app_id=AppId, transport=Transport}=Req, Opts) ->
     #transport{proto=Proto, remote_ip=Ip, remote_port=Port} = Transport,
-    MakeRequest = fun(_) -> Request end,
-    nksip_transport:send(AppId, [{Proto, Ip, Port}], MakeRequest).
+    MakeReq = fun(_) -> Req end,
+    nksip_transport:send(AppId, [{Proto, Ip, Port}], MakeReq, Opts).
         
-
-
-%% ===================================================================
-%% Private
-%% ===================================================================
-
-%% @private
--spec add_via(nksip:request()) -> nksip:request().
-
-add_via(#sipmsg{sipapp_id=AppId, ruri=RUri, vias=Vias, opts=Opts}=Request) ->
-    GlobalId = nksip_config:get(global_id),
-    IsStateless = lists:member(stateless, Opts),
-    case Vias of
-        [Via|_] when IsStateless ->
-            % If it is a stateless proxy, generates the new Branch as a hash
-            % of the main NkSIP's id and the old branch. It generates also 
-            % a nksip tag to detect the response correctly
-            Base = case nksip_lib:get_binary(branch, Via#via.opts) of
-                <<"z9hG4bK", OBranch/binary>> ->
-                    {AppId, OBranch};
-                _ ->
-                    #sipmsg{from_tag=FromTag, to_tag=ToTag, call_id=CallId, 
-                                cseq=CSeq} = Request,
-                    % Any of these will change in every transaction
-                    {AppId, Via, ToTag, FromTag, CallId, CSeq, RUri}
-            end,
-            Branch = nksip_lib:hash(Base),
-            NkSip = nksip_lib:hash({Branch, GlobalId, stateless});
-        _ ->
-            % Generate a brand new Branch
-            Branch = nksip_lib:uid(),
-            NkSip = nksip_lib:hash({Branch, GlobalId})
-    end,
-    ViaOpts = [rport, {branch, <<"z9hG4bK",Branch/binary>>}, {nksip, NkSip}],
-    Request#sipmsg{vias=[#via{opts=ViaOpts}|Vias]}.
-
 
 
 %% ===================================================================
@@ -127,42 +95,56 @@ add_via(#sipmsg{sipapp_id=AppId, ruri=RUri, vias=Vias, opts=Opts}=Request) ->
 %% ===================================================================
 
 %% @private
--spec make_request_fun(nksip:request()) ->
+-spec make_request_fun(nksip:request(), nksip:uri(), binary(), nksip_lib:proplist()) ->
     function().
 
-make_request_fun(#sipmsg{
-                    sipapp_id = AppId, 
-                    method = Method, 
-                    ruri = RUri, 
-                    from = From, 
-                    vias = [Via|RestVias],
-                    routes = Routes, 
-                    contacts = Contacts, 
-                    headers = Headers, 
-                    body = Body, 
-                    opts = Opts
-                } = Request) ->
-    GlobalId = nksip_config:get(global_id),
-    RouteBranch = case RestVias of
-        [#via{opts=RBOpts}|_] -> nksip_lib:get_binary(branch, RBOpts);
-        _ -> <<>>
-    end,
+make_request_fun(Req, Dest, GlobalId, Opts) ->
+    #sipmsg{
+        class = {req, Method},
+        app_id = AppId, 
+        ruri = RUri, 
+        call_id = CallId,
+        from = From, 
+        vias = Vias,
+        routes = Routes, 
+        contacts = Contacts, 
+        headers = Headers, 
+        body = Body
+    } = Req,
+    #uri{scheme=Scheme} = Dest,     % RUri or first route
     fun(#transport{
                     proto = Proto, 
                     listen_ip = ListenIp, 
                     listen_port = ListenPort
                 } = Transport) ->
-        ListenHost = case nksip_lib:get_value(local_host, Opts, auto) of
-            auto when ListenIp =:= {0,0,0,0} -> 
-                nksip_lib:to_binary(nksip_transport:main_ip());
-            auto -> 
-                nksip_lib:to_binary(ListenIp);
-            Host -> 
-                nksip_lib:to_binary(Host)
+        ListenHost = case size(ListenIp) of
+            4 ->
+                case nksip_lib:get_value(local_host, Opts, auto) of
+                    auto when ListenIp =:= {0,0,0,0} -> 
+                        nksip_lib:to_host(nksip_transport:main_ip());
+                    auto -> 
+                        nksip_lib:to_host(ListenIp);
+                    Host -> 
+                        Host
+                end;
+            8 ->
+                case nksip_lib:get_value(local_host6, Opts, auto) of
+                    auto when ListenIp =:= {0,0,0,0,0,0,0,0} -> 
+                        nksip_lib:to_host(nksip_transport:main_ip6(), true);
+                    auto -> 
+                        nksip_lib:to_host(ListenIp, true);
+                    Host -> 
+                        Host
+                end
+        end,
+        ?debug(AppId, CallId, "UAC listenhost is ~s", [ListenHost]),
+        RouteBranch = case Vias of
+            [#via{opts=RBOpts}|_] -> nksip_lib:get_binary(branch, RBOpts);
+            _ -> <<>>
         end,
         % The user hash is used when the Record-Route is sent back from the UAS
         % to notice it is ours, and change it to the destination transport
-        % (see nksip_transport_uas:send_response/1)
+        % (see nksip_transport_uas:send_response/2)
         % The nksip tag is used to confirm it is ours and to check if a strict router
         % has used it as Request Uri (see nksip_uas:strict_router/1)
         RecordRoute = case lists:member(record_route, Opts) of
@@ -184,35 +166,95 @@ make_request_fun(#sipmsg{
         Contacts1 = case lists:member(make_contact, Opts) of
             true ->
                 [#uri{
-                    scheme = case Proto of tls -> sips; _ -> sip end,
+                    scheme = case Scheme of sips -> sips; _ -> sip end,
                     user = From#uri.user,
                     domain = ListenHost,
                     port = ListenPort,
-                    opts = if
-                        Proto=:=tls; Proto=:=udp -> []; 
-                        true -> [{transport, Proto}] 
+                    opts = case Proto of
+                        tls when Scheme=:=sips -> [];
+                        udp when Scheme=:=sip -> [];
+                        _ -> [{transport, Proto}] 
                     end
                 }|Contacts];
             false ->
                 Contacts
         end,
-        Via1 = Via#via{proto=Proto, domain=ListenHost, port=ListenPort},
+        IsStateless = lists:member(stateless_via, Opts),
+        case Vias of
+            [Via0|_] when IsStateless ->
+                % If it is a stateless proxy, generates the new Branch as a hash
+                % of the main NkSIP's id and the old branch. It generates also 
+                % a nksip tag to detect the response correctly
+                Base = case nksip_lib:get_binary(branch, Via0#via.opts) of
+                    <<"z9hG4bK", OBranch/binary>> ->
+                        {AppId, OBranch};
+                    _ ->
+                        #sipmsg{from_tag=FromTag, to_tag=ToTag, call_id=CallId, 
+                                    cseq=CSeq} = Req,
+                        % Any of these will change in every transaction
+                        {AppId, Via0, ToTag, FromTag, CallId, CSeq, RUri}
+                end,
+                Branch = nksip_lib:hash(Base),
+                NkSip = nksip_lib:hash({Branch, GlobalId, stateless});
+            _ ->
+                % Generate a brand new Branch
+                Branch = nksip_lib:uid(),
+                NkSip = nksip_lib:hash({Branch, GlobalId})
+        end,
+        Via1 = #via{
+            proto = Proto, 
+            domain = ListenHost, 
+            port = ListenPort, 
+            opts = [rport, {branch, <<"z9hG4bK",Branch/binary>>}, {nksip, NkSip}]
+        },
         Headers1 = nksip_headers:update(Headers, 
                                     [{before_multi, <<"Record-Route">>, RecordRoute}]),
         Body1 = case Body of 
             #sdp{} = SDP -> nksip_sdp:update_ip(SDP, ListenHost);
             _ -> Body
         end,
-        Request#sipmsg{
+        Req#sipmsg{
             transport = Transport,
             ruri = nksip_parse:uri2ruri(RUri),
-            vias = [Via1|RestVias],
+            vias = [Via1|Vias],
             routes = Routes,
             contacts = Contacts1,
             headers = Headers1,
             body = Body1
         }
     end.
+
+
+% %% @private
+% %% Recognizes options stateless
+% -spec add_via(nksip:request(), binary(), nksip_lib:proplist()) -> 
+%     nksip:request().
+
+% add_via(#sipmsg{app_id=AppId, ruri=RUri, vias=Vias}=Req, GlobalId, Opts) ->
+%     IsStateless = lists:member(stateless, Opts),
+%     case Vias of
+%         [Via|_] when IsStateless ->
+%             % If it is a stateless proxy, generates the new Branch as a hash
+%             % of the main NkSIP's id and the old branch. It generates also 
+%             % a nksip tag to detect the response correctly
+%             Base = case nksip_lib:get_binary(branch, Via#via.opts) of
+%                 <<"z9hG4bK", OBranch/binary>> ->
+%                     {AppId, OBranch};
+%                 _ ->
+%                     #sipmsg{from_tag=FromTag, to_tag=ToTag, call_id=CallId, 
+%                                 cseq=CSeq} = Req,
+%                     % Any of these will change in every transaction
+%                     {AppId, Via, ToTag, FromTag, CallId, CSeq, RUri}
+%             end,
+%             Branch = nksip_lib:hash(Base),
+%             NkSip = nksip_lib:hash({Branch, GlobalId, stateless});
+%         _ ->
+%             % Generate a brand new Branch
+%             Branch = nksip_lib:uid(),
+%             NkSip = nksip_lib:hash({Branch, GlobalId})
+%     end,
+%     ViaOpts = [rport, {branch, <<"z9hG4bK",Branch/binary>>}, {nksip, NkSip}],
+%     Req#sipmsg{vias=[#via{opts=ViaOpts}|Vias]}.
 
 
 

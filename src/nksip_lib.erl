@@ -22,19 +22,19 @@
 -module(nksip_lib).
 -author('Carlos Gonzalez <carlosj.gf@gmail.com>').
 
--export([tokenize/2, untokenize/1]).
 -export([cseq/0, luid/0, lhash/1, uid/0, hash/1]).
--export([get_local_ips/0, find_main_ip/0, find_main_ip/1]).
+-export([get_local_ips/0, find_main_ip/0, find_main_ip/2]).
 -export([timestamp/0, l_timestamp/0, l_timestamp_to_float/1]).
 -export([timestamp_to_local/1, timestamp_to_gmt/1]).
 -export([local_to_timestamp/1, gmt_to_timestamp/1]).
 -export([get_value/2, get_value/3, get_binary/2, get_binary/3, get_list/2, get_list/3]).
 -export([get_integer/2, get_integer/3]).
--export([to_binary/1, to_list/1, to_integer/1, to_ip/1, is_string/1]).
--export([to_lower/1, to_upper/1]).
--export([bjoin/1, bjoin/2, hex/1, extract/2, delete/2, cancel_timer/1, msg/2]).
+-export([to_binary/1, to_list/1, to_integer/1, to_ip/1, to_host/1, to_host/2]).
+-export([to_lower/1, to_upper/1, is_string/1]).
+-export([bjoin/1, bjoin/2, hex/1, extract/2, delete/2, bin_last/2]).
+-export([cancel_timer/1, msg/2]).
 
--export_type([proplist/0, timestamp/0, l_timestamp/0, token/0, token_list/0]).
+-export_type([proplist/0, timestamp/0, l_timestamp/0]).
 
 -include("nksip.hrl").
 
@@ -51,144 +51,12 @@
 -type l_timestamp() :: non_neg_integer().
 
 
-%% Token representation in SIP Header
--type token() :: {Name::binary(), Opts::proplist()}.
-
-%% Internal tokenizer result
--type token_list() :: [{string()} | char()].
-
-
 
 %% ===================================================================
 %% Public
 %% =================================================================
 
-%% @doc Scans an `string()' or `binary()' for tokens.
-%%  
-%%  The string is first partitioned in lines using `","' as separator, and each line
-%%  will be a term in the resulting arrary. For each line, each token is found using 
-%%  whitespace as separator, and returned as `{string()}'. 
-%%
-%%  Depending on `Class', new separators are used: (`<>:@;=?&' for `uri', 
-%% `/:;=' for `via', `:=' for `token' and `=' for `equal').
-%%
-%%  Any part enclosed in double quotes is returned as a token, including the
-%%  quotes.  Any part enclosed in `<' and `>' is processed, but the `<' and `>' 
-%%  separators are included in the returned list and no `","' is processed inside.
-%%  <br/><br/>
-%%  Example: 
-%%
-%%  ```tokenize(<<"this is \"an, example\", and; this < is ; other, bye> ">>, uri)'''
-%%  returns
-%%  ```
-%%  [
-%%      [{"this"},{"is"},{"\"an, example\""}],
-%%      [{"and"},$;,{"this"},$<,{"is"},$;,{"other"}],
-%%      [{"bye"},$>]
-%%  ]
-%%  '''
-%%
--spec tokenize(Input, Class) -> [token_list()]
-    when Input :: binary() | string(), Class :: none|uri|via|token|equal.
-
-tokenize(Bin, Class) when is_binary(Bin) ->
-    tokenize(binary_to_list(Bin), Class);
-
-tokenize([], _) ->
-    [];
-
-tokenize(List, Class) when is_list(List), is_atom(Class) -> 
-    tokenize(List, none, Class, [], [], []);
-
-tokenize(_, _) ->
-    [].
-
-
-tokenize([Ch|Rest], Quote, Class, Chs, Words, Lines) -> 
-    if
-        Ch=:=$", Quote=:=none, Chs=:=[] ->  % Only after WS or token (Chs==[])
-            tokenize(Rest, double, Class, [$"], Words, Lines);
-        Ch=:=$", Quote=:=double  ->
-            Words1 = [{lists:reverse([$"|Chs])}|Words],
-            tokenize(Rest, none, Class, [], Words1, Lines);
-        Ch=:=$,, Quote=:=none, Chs=:=[] ->
-            tokenize(Rest, none, Class, [], [], [lists:reverse(Words)|Lines]);
-        Ch=:=$,, Quote=:=none ->
-            Words1 = [{lists:reverse(Chs)}|Words],
-            tokenize(Rest, none, Class, [], [], [lists:reverse(Words1)|Lines]);
-        (Ch=:=32 orelse Ch=:=9) andalso Quote=:=none ->
-            case Chs of
-                [] -> tokenize(Rest, Quote, Class, [], Words, Lines);
-                _ -> tokenize(Rest, Quote, Class, [], [{lists:reverse(Chs)}|Words], Lines)
-            end;
-        Class=/=[] andalso Quote=:=none ->
-            case is_token(Ch, Class) of
-                true when Chs=:=[] -> 
-                    tokenize(Rest, Quote, Class, [], [Ch|Words], Lines);
-                true -> 
-                    tokenize(Rest, Quote, Class, [], [Ch, {lists:reverse(Chs)}|Words], Lines);
-                false ->
-                    tokenize(Rest, Quote, Class, [Ch|Chs], Words, Lines)
-            end;
-        true ->
-            tokenize(Rest, Quote, Class, [Ch|Chs], Words, Lines)
-    end;
-
-tokenize([], Quote, Class, Chs, Words, Lines) -> 
-    if
-        Quote=:=double -> 
-            tokenize([$"], double, Class, Chs, Words, Lines);
-        Chs=:=[] -> 
-            lists:reverse([lists:reverse(Words)|Lines]);
-        true ->
-            Words1 = [{lists:reverse(Chs)}|Words],
-            lists:reverse([lists:reverse(Words1)|Lines])
-    end.
-
-%% @private
-is_token($<, none) -> false;
-is_token($<, uri) -> true;
-is_token($>, uri) -> true;
-is_token($:, uri) -> true;
-is_token($@, uri) -> true;
-is_token($;, uri) -> true;
-is_token($=, uri) -> true;
-is_token($?, uri) -> true;
-is_token($&, uri) -> true;
-is_token($/, via) -> true;
-is_token($:, via) -> true;
-is_token($;, via) -> true;
-is_token($=, via) -> true;
-is_token($;, token) -> true;
-is_token($=, token) -> true;
-is_token($=, equal) -> true;
-is_token(_, _) -> false.
-
-
-%% @doc Serializes a `token_list()' list
--spec untokenize([token_list()]) -> 
-    iolist().
-
-untokenize(Lines) ->
-    untokenize_lines(Lines, []).
-
-untokenize_lines([Line|Rest], Acc) ->
-    untokenize_lines(Rest, [$,, untokenize_words(Line, [])|Acc]);
-untokenize_lines([], [$,|Acc]) ->
-    lists:reverse(Acc);
-untokenize_lines([], []) ->
-    [].
-
-untokenize_words([{Word1}, {Word2}|Rest], Acc) ->
-    untokenize_words([{Word2}|Rest], [32, Word1|Acc]);
-untokenize_words([{Word1}|Rest], Acc) ->
-    untokenize_words(Rest, [Word1|Acc]);
-untokenize_words([Sep|Rest], Acc) ->
-    untokenize_words(Rest, [Sep|Acc]);
-untokenize_words([], Acc) ->
-    lists:reverse(Acc).
-
-
+%
 %% @doc Generates an incrementing-each-second 31 bit integer.
 %% It will not wrap around until until {{2080,1,19},{3,14,7}} GMT.
 -spec cseq() -> 
@@ -207,7 +75,7 @@ cseq() ->
     binary().
 
 luid() ->
-    lhash({make_ref(), now()}).
+    lhash({make_ref(), os:timestamp()}).
 
 
 %% @doc Generates a new printable SHA hash binary over `Base' (using 160 bits).
@@ -239,47 +107,55 @@ hash(Base) ->
 
 %% @doc Get all local network ips.
 -spec get_local_ips() -> 
-    [inet:ip4_address()].
+    [inet:ip_address()].
 
 get_local_ips() ->
     {ok, All} = inet:getifaddrs(),
-    lists:flatten([
-        [{A,B,C,D} || {A,B,C,D} <- proplists:get_all_values(addr, Data)]
-        || {_, Data} <- All
-    ]).
+    lists:flatten([proplists:get_all_values(addr, Data) || {_, Data} <- All]).
 
 
-%% @doc Equivalent to `find_main_ip(auto)'.
+%% @doc Equivalent to `find_main_ip(auto, ipv4)'.
 -spec find_main_ip() -> 
-    inet:ip4_address().
+    inet:ip_address().
 
 find_main_ip() ->
-    find_main_ip(auto).
+    find_main_ip(auto, ipv4).
 
 
 %% @doc Finds the <i>best</i> local IP.
 %% If a network interface is supplied (as "en0") it returns its ip.
-%% If `auto' is used, probes `eth0', `eth1', `en0' and `en1'. If none is available returns 
-%% any other of the host's addresses.
--spec find_main_ip(auto|string()) -> 
-    inet:ip4_address().
+%% If `auto' is used, probes `ethX' and `enX' interfaces. If none is available returns 
+%% localhost
+-spec find_main_ip(auto|string(), ipv4|ipv6) -> 
+    inet:ip_address().
 
-find_main_ip(NetInterface) ->
+find_main_ip(NetInterface, Type) ->
     {ok, All} = inet:getifaddrs(),
     case NetInterface of
         auto ->
-            IFaces = ["eth0", "eth1", "en0", "en1" | proplists:get_keys(All)],
-            find_main_ip(IFaces, All);
+            IFaces = lists:filter(
+                fun(Name) ->
+                    case Name of
+                        "eth" ++ _ -> true;
+                        "en" ++ _ -> true;
+                        _ -> false
+                    end
+                end,
+                proplists:get_keys(All)),
+            find_main_ip(lists:sort(IFaces), All, Type);
         _ ->
-            find_main_ip([NetInterface], All)   
+            find_main_ip([NetInterface], All, Type)   
     end.
 
 
 %% @private
-find_main_ip([], _) ->
-    error(not_ip_found);
+find_main_ip([], _, ipv4) ->
+    {127,0,0,1};
 
-find_main_ip([IFace|R], All) ->
+find_main_ip([], _, ipv6) ->
+    {0,0,0,0,0,0,0,1};
+
+find_main_ip([IFace|R], All, Type) ->
     Data = get_value(IFace, All, []),
     Flags = get_value(flags, Data, []),
     case lists:member(up, Flags) andalso lists:member(running, Flags) of
@@ -287,23 +163,32 @@ find_main_ip([IFace|R], All) ->
             Addrs = lists:zip(
                 proplists:get_all_values(addr, Data),
                 proplists:get_all_values(netmask, Data)),
-            case find_real_ip(Addrs) of
-                error -> find_main_ip(R, All);
+            case find_real_ip(Addrs, Type) of
+                error -> find_main_ip(R, All, Type);
                 Ip -> Ip
             end;
         false ->
-            find_main_ip(R, All)
+            find_main_ip(R, All, Type)
     end.
 
 %% @private
-find_real_ip([]) ->
+find_real_ip([], _Type) ->
     error;
 
-find_real_ip([{{A,B,C,D}, Netmask}|_]) when Netmask =/= {255,255,255,255} ->
+% Skip link-local addresses
+find_real_ip([{{65152,_,_,_,_,_,_,_}, _Netmask}|R], Type) ->
+    find_real_ip(R, Type);
+
+find_real_ip([{{A,B,C,D}, Netmask}|_], ipv4) 
+             when Netmask =/= {255,255,255,255} ->
     {A,B,C,D};
 
-find_real_ip([_|R]) ->
-    find_real_ip(R).
+find_real_ip([{{A,B,C,D,E,F,G,H}, Netmask}|_], ipv6) 
+             when Netmask =/= {65535,65535,65535,65535,65535,65535,65535,65535} ->
+    {A,B,C,D,E,F,G,H};
+
+find_real_ip([_|R], Type) ->
+    find_real_ip(R, Type).
 
 
 % calendar:datetime_to_gregorian_seconds({{1970,1,1},{0,0,0}}).
@@ -455,15 +340,7 @@ to_binary(A) when is_atom(A) -> atom_to_binary(A, latin1);
 to_binary(I) when is_integer(I) -> list_to_binary(erlang:integer_to_list(I));
 to_binary(#uri{}=Uri) -> nksip_unparse:uri(Uri);
 to_binary(#via{}=Via) -> nksip_unparse:via(Via);
-to_binary({A,B,C,D}=Address) 
-    when is_integer(A), is_integer(B), is_integer(C), is_integer(D) ->
-    list_to_binary(inet_parse:ntoa(Address));
-to_binary({A,B,C,D,E,F,G,H}=Address) 
-    when is_integer(A), is_integer(B), is_integer(C), is_integer(D),
-    is_integer(E), is_integer(F), is_integer(G), is_integer(H) ->
-    list_to_binary(inet_parse:ntoa(Address));
-to_binary(N) -> 
-    msg("~p", [N]).
+to_binary(N) -> msg("~p", [N]).
 
 
 %% @doc Converts anything into a `string()'.
@@ -500,6 +377,13 @@ to_integer(_) ->
 to_ip(Address) when is_binary(Address) ->
     to_ip(binary_to_list(Address));
 
+% For IPv6
+to_ip([$[ | Address1]) ->
+    case lists:reverse(Address1) of
+        [$] | Address2] -> to_ip(lists:reverse(Address2));
+        _ -> error
+    end;
+
 to_ip(Address) when is_list(Address) ->
     case inet_parse:address(Address) of
         {ok, Ip} -> {ok, Ip};
@@ -507,7 +391,34 @@ to_ip(Address) when is_list(Address) ->
     end.
 
 
-% @doc converts a `string()' or `binary()' to a lower `binary()'.
+%% @doc Converts an IP or host to a binary host value
+-spec to_host(inet:ip_address() | string() | binary()) ->
+    binary().
+
+to_host(IpOrHost) ->
+    to_host(IpOrHost, false).
+
+
+%% @doc Converts an IP or host to a binary host value. 
+% If `IsUri' and it is an IPv6 address, it will be enclosed in `[' and `]'
+-spec to_host(inet:ip_address() | string() | binary(), boolean()) ->
+    binary().
+
+to_host({A,B,C,D}=Address, _IsUri) 
+    when is_integer(A), is_integer(B), is_integer(C), is_integer(D) ->
+    list_to_binary(inet_parse:ntoa(Address));
+to_host({A,B,C,D,E,F,G,H}=Address, IsUri) 
+    when is_integer(A), is_integer(B), is_integer(C), is_integer(D),
+    is_integer(E), is_integer(F), is_integer(G), is_integer(H) ->
+    case IsUri of
+        true -> list_to_binary([$[, inet_parse:ntoa(Address), $]]);
+        false -> list_to_binary(inet_parse:ntoa(Address))
+    end;
+to_host(Host, _IsUri) ->
+    to_binary(Host).
+
+
+%% @doc converts a `string()' or `binary()' to a lower `binary()'.
 -spec to_lower(string()|binary()|atom()) ->
     binary().
 
@@ -517,7 +428,7 @@ to_lower(Other) ->
     to_lower(to_list(Other)).
 
 
-% @doc converts a `string()' or `binary()' to an upper `binary()'.
+%% @doc converts a `string()' or `binary()' to an upper `binary()'.
 -spec to_upper(string()|binary()|atom()) ->
     binary().
     
@@ -599,7 +510,7 @@ delete(PropList, KeyOrKeys) ->
     lists:filter(Fun, PropList).
 
 
-% @doc Checks if `Term' is a `string()' or `[]'.
+%% @doc Checks if `Term' is a `string()' or `[]'.
 -spec is_string(Term::term()) -> 
     boolean().
 
@@ -652,6 +563,18 @@ digit(D) when (D >= 0) and (D < 10) -> D + 48;
 digit(D) -> D + 87.
 
 
+%% @doc Gets the subbinary after `Char'.
+-spec bin_last(char(), binary()) ->
+    binary().
+
+bin_last(Char, Bin) ->
+    case binary:match(Bin, <<Char>>) of
+        {First, 1} -> binary:part(Bin, First+1, byte_size(Bin)-First-1);
+        _ -> <<>>
+    end.
+
+
+
 %% @doc Cancels and existig timer.
 -spec cancel_timer(reference()|undefined) ->
     false | integer().
@@ -681,6 +604,7 @@ msg(Msg, Vars) ->
     end.
 
 
+
 %% ===================================================================
 %% EUnit tests
 %% ===================================================================
@@ -693,16 +617,6 @@ bjoin_test() ->
     ?assertMatch(<<"hi">>, bjoin([<<"hi">>], <<"any">>)),
     ?assertMatch(<<"hianyhi">>, bjoin([<<"hi">>, <<"hi">>], <<"any">>)),
     ?assertMatch(<<"hi1_hi2_hi3">>, bjoin([<<"hi1">>, <<"hi2">>, <<"hi3">>], <<"_">>)).
-
-tokenize_test() -> 
-    R1 = [
-        [{"this"}, {"is"}, {"\"an, example\""}],
-        [{"and"}, $;, {"this"}, $<, {"is"}, $;, {"\" other, \""}, {"bye"}, $>]
-    ],
-    ?assert(
-        R1=:=tokenize("this is \"an, example\", and; this < is ; \" other, \" bye> ", uri)),
-    ?assertMatch("this is \"an, example\",and;this<is;\" other, \" bye>",
-        lists:flatten(untokenize(R1))).
 
 -endif.
 
